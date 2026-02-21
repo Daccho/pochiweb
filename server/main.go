@@ -185,10 +185,7 @@ func setupCORS(w http.ResponseWriter, r *http.Request) {
 }
 
 func getAPIKey() string {
-	key := os.Getenv("CLAUDE_API_KEY")
-	if key == "" {
-		key = os.Getenv("ANTHROPIC_API_KEY")
-	}
+	key := os.Getenv("ANTHROPIC_API_KEY")
 	return strings.TrimSpace(key)
 }
 
