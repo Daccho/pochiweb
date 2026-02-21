@@ -1,29 +1,21 @@
-package main
+package handler
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-
-	"github.com/joho/godotenv"
 )
-
-const (
-	Port = "8080"
-)
-
-type ChatRequest struct {
-	Messages []Message `json:"messages"`
-}
 
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+type ChatRequest struct {
+	Messages []Message `json:"messages"`
 }
 
 type ChatResponse struct {
@@ -84,16 +76,10 @@ func callClaude(apiKey string, messages []Message) (string, error) {
 	return text, nil
 }
 
-func chatHandler(w http.ResponseWriter, r *http.Request) {
-	// CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+// Vercel Entrypoint
+func Handler(w http.ResponseWriter, r *http.Request) {
+	// Vercel handles CORS automatically mostly, but good to have specific headers if needed
+	// For Vercel API routes, we often just proceed.
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -102,7 +88,7 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 
 	apiKey := os.Getenv("CLAUDE_API_KEY")
 	if apiKey == "" {
-		http.Error(w, "Server API key not configured", http.StatusInternalServerError)
+		http.Error(w, "Server API key not configured in Vercel Environment Variables", http.StatusInternalServerError)
 		return
 	}
 
@@ -112,33 +98,12 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Received chat request with %d messages", len(req.Messages))
-
 	response, err := callClaude(apiKey, req.Messages)
 	if err != nil {
-		log.Printf("Error calling LLM: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to generate response: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ChatResponse{Response: response})
-}
-
-func main() {
-	// Load .env file
-	_ = godotenv.Load()
-
-	// Serve static files from ../dist
-	distPath := filepath.Join("..", "dist")
-	fs := http.FileServer(http.Dir(distPath))
-	
-	// Handle API requests
-	http.HandleFunc("/api/chat", chatHandler)
-	
-	// Handle static files
-	http.Handle("/", fs)
-
-	log.Printf("🧸 PochiWeb Server running on port %s", Port)
-	log.Fatal(http.ListenAndServe(":"+Port, nil))
 }
