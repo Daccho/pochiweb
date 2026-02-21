@@ -10,3 +10,4 @@ server/.env
 # Editor
 .vscode/
 .idea/
+.env
