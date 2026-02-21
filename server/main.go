@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -17,7 +18,10 @@ const (
 	Port = "8080"
 )
 
-type ChatRequest struct {
+// --- Types ---
+
+// Web Request (Standard)
+type ChatRequestWeb struct {
 	Messages []Message `json:"messages"`
 }
 
@@ -26,29 +30,62 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// WearOS Request (Legacy)
+type ChatRequestWear struct {
+	Message string `json:"message"`
+	Session string `json:"session"`
+}
+
+// Common Response
 type ChatResponse struct {
 	Response string `json:"response"`
 }
 
-// Call Anthropic API
+// --- Logic ---
+
+func loadContext() string {
+	files := []string{"IDENTITY.md", "SOUL.md", "USER.md"}
+	var context strings.Builder
+	
+	// Try to load from ./context directory (Docker/Cloud Run)
+	baseDir := "./context" 
+	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
+		// Fallback for local dev
+		baseDir = "../../.openclaw/workspace" 
+	}
+
+	for _, file := range files {
+		path := filepath.Join(baseDir, file)
+		content, err := ioutil.ReadFile(path)
+		if err == nil {
+			context.WriteString(fmt.Sprintf("\n\n--- %s ---\n%s", file, string(content)))
+		}
+	}
+	return context.String()
+}
+
 func callClaude(apiKey string, messages []Message) (string, error) {
 	url := "https://api.anthropic.com/v1/messages"
+	
+	systemPrompt := "You are Pochi (ぽち) 🧸. Your personality context is loaded below. Keep responses warm, helpful, and concise." + loadContext()
 
-	// Convert messages to Anthropic format
+	// Build Anthropic messages
 	anthropicMessages := []map[string]string{}
 	for _, m := range messages {
-		if m.Role == "user" || m.Role == "assistant" {
-			anthropicMessages = append(anthropicMessages, map[string]string{
-				"role":    m.Role,
-				"content": m.Content,
-			})
+		role := m.Role
+		if role != "user" && role != "assistant" {
+			continue
 		}
+		anthropicMessages = append(anthropicMessages, map[string]string{
+			"role":    role,
+			"content": m.Content,
+		})
 	}
 
 	requestBody, _ := json.Marshal(map[string]interface{}{
 		"model":      "claude-3-haiku-20240307",
 		"max_tokens": 1024,
-		"system":     "You are Pochi (ぽち) 🧸. A friendly AI assistant. Keep responses warm and helpful.",
+		"system":     systemPrompt,
 		"messages":   anthropicMessages,
 	})
 
@@ -84,37 +121,53 @@ func callClaude(apiKey string, messages []Message) (string, error) {
 	return text, nil
 }
 
-func chatHandler(w http.ResponseWriter, r *http.Request) {
-	// CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+// --- Handlers ---
 
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+func chatHandlerWeb(w http.ResponseWriter, r *http.Request) {
+	setupCORS(w, r)
+	if r.Method == http.MethodOptions { return }
 
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	apiKey := os.Getenv("CLAUDE_API_KEY")
+	apiKey := getAPIKey()
 	if apiKey == "" {
 		http.Error(w, "Server API key not configured", http.StatusInternalServerError)
 		return
 	}
 
-	var req ChatRequest
+	var req ChatRequestWeb
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Received chat request with %d messages", len(req.Messages))
+	log.Printf("[Web] Received chat with %d messages", len(req.Messages))
+	handleChat(w, apiKey, req.Messages)
+}
 
-	response, err := callClaude(apiKey, req.Messages)
+func chatHandlerWear(w http.ResponseWriter, r *http.Request) {
+	setupCORS(w, r)
+	if r.Method == http.MethodOptions { return }
+
+	apiKey := getAPIKey()
+	if apiKey == "" {
+		http.Error(w, "Server API key not configured", http.StatusInternalServerError)
+		return
+	}
+
+	var req ChatRequestWear
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[WearOS] Received message: %s", req.Message)
+	
+	// Convert single message to history format
+	messages := []Message{{Role: "user", Content: req.Message}}
+	handleChat(w, apiKey, messages)
+}
+
+func handleChat(w http.ResponseWriter, apiKey string, messages []Message) {
+	response, err := callClaude(apiKey, messages)
 	if err != nil {
 		log.Printf("Error calling LLM: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to generate response: %v", err), http.StatusInternalServerError)
@@ -125,20 +178,40 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(ChatResponse{Response: response})
 }
 
+func setupCORS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+}
+
+func getAPIKey() string {
+	key := os.Getenv("CLAUDE_API_KEY")
+	if key == "" {
+		key = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	return strings.TrimSpace(key)
+}
+
 func main() {
-	// Load .env file
 	_ = godotenv.Load()
 
-	// Serve static files from ../dist
-	distPath := filepath.Join("..", "dist")
-	fs := http.FileServer(http.Dir(distPath))
+	// Web Endpoint
+	http.HandleFunc("/api/chat", chatHandlerWeb)
 	
-	// Handle API requests
-	http.HandleFunc("/api/chat", chatHandler)
-	
-	// Handle static files
-	http.Handle("/", fs)
+	// WearOS Endpoint (Compatibility)
+	http.HandleFunc("/api/v1/chat", chatHandlerWear)
 
-	log.Printf("🧸 PochiWeb Server running on port %s", Port)
-	log.Fatal(http.ListenAndServe(":"+Port, nil))
+	// Health Check (for Cloud Run)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("🧸 Pochi Server is running!"))
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = Port
+	}
+
+	log.Printf("🧸 Pochi Server running on port %s", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
